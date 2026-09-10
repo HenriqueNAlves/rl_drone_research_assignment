@@ -3,8 +3,8 @@ import re
 import time
 
 import mujoco
-
 from stable_baselines3 import PPO
+
 from test_env import DroneLandingEnv
 
 
@@ -24,10 +24,13 @@ for filename in os.listdir(model_dir):
     )
 
     if match:
-        existing_versions.append(int(match.group(1)))
+        existing_versions.append(
+            int(match.group(1))
+        )
 
 
 if not existing_versions:
+
     raise FileNotFoundError(
         "No trained models found in ppo_models/"
     )
@@ -40,7 +43,9 @@ model_path = os.path.join(
     f"ppo_drone_landing_v{latest_version}"
 )
 
-print(f"Loading model: {model_path}.zip")
+print(
+    f"Loading model: {model_path}.zip"
+)
 
 
 # ============================================================
@@ -62,16 +67,37 @@ env = DroneLandingEnv()
 # ============================================================
 
 starting_positions = [
+
     [0.0, 0.0, 1.0],
+
     [0.2, 0.0, 1.0],
+
     [-0.2, 0.0, 1.0],
+
     [0.0, 0.2, 1.0],
+
     [0.0, -0.2, 1.0],
+
     [0.4, 0.0, 1.0],
+
     [-0.4, 0.0, 1.0],
+
     [0.0, 0.4, 1.0],
+
     [0.0, -0.4, 1.0],
+
 ]
+
+
+# ============================================================
+# EVALUATION STATISTICS
+# ============================================================
+
+total_episodes = len(starting_positions)
+
+successful_episodes = 0
+
+episode_results = []
 
 
 # ============================================================
@@ -89,80 +115,210 @@ with mujoco.viewer.launch_passive(
 
     position_index = 0
 
-    # Set initial drone position
+    # --------------------------------------------------------
+    # SET INITIAL DRONE POSITION
+    # --------------------------------------------------------
+
     env.data.qpos[
         env.model.jnt_qposadr[env.drone_joint_id]:
         env.model.jnt_qposadr[env.drone_joint_id] + 3
     ] = starting_positions[position_index]
 
-    mujoco.mj_forward(env.model, env.data)
+    mujoco.mj_forward(
+        env.model,
+        env.data
+    )
 
     observation = env._get_observation()
 
+    print()
+    print("=" * 70)
+    print("                     EVALUATION")
+    print("=" * 70)
+    print(
+        f"Testing {total_episodes} starting positions"
+    )
+    print("=" * 70)
+
     print(
         f"\nTESTING STARTING POSITION "
-        f"{position_index + 1}/{len(starting_positions)}: "
+        f"{position_index + 1}/{total_episodes}: "
         f"{starting_positions[position_index]}"
     )
 
+    # ========================================================
+    # RUN EVALUATION
+    # ========================================================
+
     while viewer.is_running():
 
-        # Ask PPO what action to take
+        # ----------------------------------------------------
+        # ASK PPO WHAT ACTION TO TAKE
+        # ----------------------------------------------------
+
         action, _ = model.predict(
             observation,
             deterministic=True
         )
 
-        # Apply action to our environment
-        observation, reward, terminated, truncated, info = env.step(action)
+        # ----------------------------------------------------
+        # APPLY ACTION
+        # ----------------------------------------------------
 
-        # Update viewer
+        observation, reward, terminated, truncated, info = (
+            env.step(action)
+        )
+
+        # ----------------------------------------------------
+        # UPDATE VIEWER
+        # ----------------------------------------------------
+
         viewer.sync()
 
-        # Print episode result
+        # ----------------------------------------------------
+        # EPISODE ENDED
+        # ----------------------------------------------------
+
         if terminated or truncated:
 
+            termination_reason = info[
+                "termination_reason"
+            ]
+
+            # ------------------------------------------------
+            # CHECK SUCCESS
+            # ------------------------------------------------
+
+            success = (
+                termination_reason
+                == "successful_landing"
+            )
+
+            if success:
+                successful_episodes += 1
+
+            # Store result
+            episode_results.append(
+                {
+                    "starting_position":
+                        starting_positions[position_index],
+                    "success":
+                        success,
+                    "termination_reason":
+                        termination_reason,
+                    "reward":
+                        reward,
+                }
+            )
+
+            # ------------------------------------------------
+            # PRINT EPISODE RESULT
+            # ------------------------------------------------
+
+            print()
+            print("-" * 70)
+
+            if success:
+                print("RESULT: SUCCESS")
+            else:
+                print("RESULT: FAILURE")
+
             print(
-                "EPISODE ENDED:",
-                info["termination_reason"],
+                "Termination reason:",
+                termination_reason
+            )
+
+            print(
                 "Reward:",
                 reward
             )
 
-            # Move to next starting position
+            print("-" * 70)
+
+            # ------------------------------------------------
+            # MOVE TO NEXT STARTING POSITION
+            # ------------------------------------------------
+
             position_index += 1
 
-            if position_index >= len(starting_positions):
-                print("\nFinished testing all starting positions.")
+            if position_index >= total_episodes:
+
+                # ============================================
+                # FINAL EVALUATION RESULTS
+                # ============================================
+
+                success_rate = (
+                    100.0
+                    * successful_episodes
+                    / total_episodes
+                )
+
+                print()
+                print("=" * 70)
+                print("                 EVALUATION COMPLETE")
+                print("=" * 70)
+
+                print(
+                    f"Successful landings: "
+                    f"{successful_episodes}/{total_episodes}"
+                )
+
+                print(
+                    f"SUCCESS RATE: "
+                    f"{success_rate:.2f}%"
+                )
+
+                print("=" * 70)
+
                 break
 
-            # Reset environment
+            # ------------------------------------------------
+            # RESET ENVIRONMENT
+            # ------------------------------------------------
+
             observation, info = env.reset()
 
-            # Set new drone starting position
+            # ------------------------------------------------
+            # SET NEW DRONE STARTING POSITION
+            # ------------------------------------------------
+
             env.data.qpos[
                 env.model.jnt_qposadr[env.drone_joint_id]:
                 env.model.jnt_qposadr[env.drone_joint_id] + 3
             ] = starting_positions[position_index]
 
-            # Zero the drone velocity
+            # ------------------------------------------------
+            # ZERO DRONE VELOCITY
+            # ------------------------------------------------
+
             env.data.qvel[
                 env.model.jnt_dofadr[env.drone_joint_id]:
                 env.model.jnt_dofadr[env.drone_joint_id] + 6
             ] = 0.0
 
-            mujoco.mj_forward(env.model, env.data)
+            mujoco.mj_forward(
+                env.model,
+                env.data
+            )
 
-            # Get observation corresponding to new position
+            # ------------------------------------------------
+            # GET NEW OBSERVATION
+            # ------------------------------------------------
+
             observation = env._get_observation()
 
+            print()
             print(
-                f"\nTESTING STARTING POSITION "
-                f"{position_index + 1}/{len(starting_positions)}: "
+                f"TESTING STARTING POSITION "
+                f"{position_index + 1}/{total_episodes}: "
                 f"{starting_positions[position_index]}"
             )
 
         time.sleep(0.002)
 
+
+# ============================================================
+# CLOSE ENVIRONMENT
+# ============================================================
 
 env.close()

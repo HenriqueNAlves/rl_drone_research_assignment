@@ -91,60 +91,102 @@ class DroneLandingEnv(gym.Env):
         # Ground collision
         self.penalty_ground_collision = 500.0  # PLACEHOLDER!!!!!!!
 
-        # Progress toward platform
+        # ============================================================
+        # HORIZONTAL PLATFORM PROGRESS
+        #
+        # This is now the primary positioning objective.
+        #
+        # The agent is rewarded for reducing its horizontal distance
+        # from the centre of the platform.
+        # ============================================================
+
         self.reward_proximity = 10.0      # PLACEHOLDER!!!!!!!
 
-        # Relative velocity penalty
+        # ============================================================
+        # FINITE PLATFORM SURFACE PROGRESS
+        #
+        # This rewards progress toward the actual finite tilted
+        # platform surface rather than an infinite plane.
+        #
+        # The reward is only activated when the drone is reasonably
+        # close to the platform horizontally.
+        # ============================================================
+
+        self.reward_surface_proximity = 5.0       # PLACEHOLDER!!!!!!!
+        self.surface_activation_distance = 0.3     # m  # PLACEHOLDER!!!!!!!
+
+        # ============================================================
+        # RELATIVE VELOCITY PENALTY
+        # ============================================================
+
         self.penalty_velocity = 1.0       # PLACEHOLDER!!!!!!!
 
-        # Orientation penalty
+        # ============================================================
+        # ORIENTATION PENALTY
+        # ============================================================
+
         self.penalty_orientation = 1.0    # PLACEHOLDER!!!!!!!
 
-        # Tower disturbance penalty
+        # ============================================================
+        # TOWER DISTURBANCE PENALTY
+        # ============================================================
+
         self.penalty_tower = 2.0          # PLACEHOLDER!!!!!!!
         self.tower_exponential_scale = 5.0  # PLACEHOLDER!!!!!!!
 
-        # High-thrust penalty
+        # ============================================================
+        # HIGH-THRUST PENALTY
+        # ============================================================
+
         self.high_thrust_threshold = 0.8  # normalized thrust  # PLACEHOLDER!!!!!!!
         self.penalty_high_thrust = 0.1    # PLACEHOLDER!!!!!!!
         self.thrust_exponential_scale = 5.0  # PLACEHOLDER!!!!!!!
 
-        # Time penalty
+        # ============================================================
+        # TIME PENALTY
+        # ============================================================
+
         self.penalty_time = 0.01          # PLACEHOLDER!!!!!!!
 
         # ============================================================
-        # TILTED PLATFORM PLANE REWARD
+        # OLD TILTED PLATFORM PLANE REWARD
         #
-        # The top surface of the platform is treated as a tilted plane.
+        # These parameters are retained for reference but are no
+        # longer used in the active reward calculation.
         #
-        # The drone is rewarded for being close to this plane.
-        #
-        # Being above the plane is penalized increasingly as the drone
-        # gets farther away.
-        #
-        # Being below the plane is penalized much more strongly,
-        # because we want to prevent the drone from descending toward
-        # the ground instead of landing on the platform.
+        # The old reward treated the platform as an infinite plane.
+        # This allowed the drone to receive a positive reward simply
+        # by approaching the plane, even when it was horizontally
+        # nowhere near the actual platform.
         # ============================================================
 
-        self.reward_plane_proximity = 5.0  # PLACEHOLDER!!!!!!!
+        # self.reward_plane_proximity = 5.0  # COMMENTED OUT
+        # self.plane_reward_distance = 0.1  # m  # COMMENTED OUT
+        # self.penalty_above_plane = 1.0  # COMMENTED OUT
+        # self.penalty_below_plane = 5.0  # COMMENTED OUT
+        # self.plane_exponential_scale = 5.0  # COMMENTED OUT
 
-        self.plane_reward_distance = 0.1  # m  # PLACEHOLDER!!!!!!!
-
-        self.penalty_above_plane = 1.0  # PLACEHOLDER!!!!!!!
-
-        self.penalty_below_plane = 5.0  # PLACEHOLDER!!!!!!!
-
-        self.plane_exponential_scale = 5.0  # PLACEHOLDER!!!!!!!
+        # ============================================================
+        # INTERNAL REWARD STATE
+        # ============================================================
 
         # Number of consecutive steps spent at high thrust
         self.high_thrust_steps = 0
 
-        # Previous distance from drone to platform
-        self.previous_distance = None
+        # Previous horizontal distance from drone to platform centre
+        self.previous_horizontal_distance = None
 
-        # Previous absolute distance from drone to platform plane
-        self.previous_plane_distance = None
+        # Previous distance from drone to finite platform surface
+        self.previous_surface_distance = None
+
+        # ============================================================
+        # OLD DISTANCE STATE
+        #
+        # Retained for reference.
+        # ============================================================
+
+        # self.previous_distance = None  # COMMENTED OUT
+        # self.previous_plane_distance = None  # COMMENTED OUT
 
         # ============================================================
         # MUJOCO MODEL
@@ -321,17 +363,26 @@ class DroneLandingEnv(gym.Env):
             "ground_geom"
         )
 
-        # Original tower positions
+        # ============================================================
+        # ORIGINAL TOWER POSITIONS
+        # ============================================================
+
         self.tower_initial_positions = np.array([
             [0.0, 0.0, 0.1],
             [0.0, 0.0, 0.3],
             [0.0, 0.0, 0.5]
         ])
 
-        # Drone freejoint
+        # ============================================================
+        # DRONE FREEJOINT
+        # ============================================================
+
         self.drone_joint_id = self.model.body_jntadr[self.drone_id]
 
-        # Platform freejoint
+        # ============================================================
+        # PLATFORM FREEJOINT
+        # ============================================================
+
         self.platform_joint_id = self.model.body_jntadr[self.platform_id]
 
         # ============================================================
@@ -339,7 +390,7 @@ class DroneLandingEnv(gym.Env):
         #
         # The top surface rises from the low side to the high side.
         #
-        # Its center height in platform-local coordinates is the
+        # Its centre height in platform-local coordinates is the
         # average of the low and high side heights.
         #
         # The plane normal is derived directly from the platform slope.
@@ -355,6 +406,10 @@ class DroneLandingEnv(gym.Env):
             height_difference
             / platform_width
         )
+
+        self.platform_slope = platform_slope
+
+        self.platform_half_width = platform_width / 2.0
 
         self.platform_plane_normal_local = np.array([
             -platform_slope,
@@ -493,6 +548,10 @@ class DroneLandingEnv(gym.Env):
     #
     # Positive = above the plane
     # Negative = below the plane
+    #
+    # This is retained as a geometric measurement.
+    #
+    # It is NO LONGER directly rewarded as an infinite-plane target.
     # ================================================================
 
     def _get_platform_plane_distance(self):
@@ -530,6 +589,92 @@ class DroneLandingEnv(gym.Env):
         )
 
         return plane_distance
+
+    # ================================================================
+    # GET DISTANCE TO FINITE PLATFORM SURFACE
+    #
+    # Unlike _get_platform_plane_distance(), this function considers
+    # the actual finite 0.2 x 0.2 m landing surface.
+    #
+    # The drone position is first expressed in platform coordinates.
+    # The closest point on the finite platform surface is then found.
+    #
+    # This prevents the reward from treating the entire infinite
+    # tilted plane as a valid landing target.
+    # ================================================================
+
+    def _get_platform_surface_distance(self):
+
+        drone_position = self.data.xpos[
+            self.drone_id
+        ]
+
+        platform_position = self.data.xpos[
+            self.platform_id
+        ]
+
+        platform_rotation = self.data.xmat[
+            self.platform_id
+        ].reshape(3, 3)
+
+        # Drone position expressed in platform-local coordinates.
+        relative_position_world = (
+            drone_position - platform_position
+        )
+
+        relative_position_platform = (
+            platform_rotation.T
+            @ relative_position_world
+        )
+
+        # ------------------------------------------------------------
+        # Find the closest x/y position on the finite platform.
+        # ------------------------------------------------------------
+
+        closest_x = np.clip(
+            relative_position_platform[0],
+            -self.platform_half_width,
+            self.platform_half_width
+        )
+
+        closest_y = np.clip(
+            relative_position_platform[1],
+            -self.platform_half_width,
+            self.platform_half_width
+        )
+
+        # ------------------------------------------------------------
+        # Height of the tilted top surface at the closest x position.
+        #
+        # The low side is at x = -0.1.
+        # The high side is at x = +0.1.
+        # ------------------------------------------------------------
+
+        closest_z = (
+            0.1
+            + self.platform_slope
+            * (closest_x + self.platform_half_width)
+        )
+
+        closest_point_platform = np.array([
+            closest_x,
+            closest_y,
+            closest_z
+        ])
+
+        # Convert closest point back into world coordinates.
+        closest_point_world = (
+            platform_position
+            + platform_rotation
+            @ closest_point_platform
+        )
+
+        # Euclidean distance to the finite platform surface.
+        surface_distance = np.linalg.norm(
+            drone_position - closest_point_world
+        )
+
+        return surface_distance
 
     # ================================================================
     # CHECK SUCCESSFUL LANDING
@@ -691,17 +836,23 @@ class DroneLandingEnv(gym.Env):
     #
     # Reward components:
     #
-    # 1. Progress toward platform
-    # 2. Platform-plane proximity
-    # 3. Penalty for being above the platform plane
-    # 4. Strong exponential penalty for being below the plane
-    # 5. Relative velocity penalty
-    # 6. Orientation penalty
-    # 7. Exponential tower disturbance penalty
-    # 8. Exponential sustained high-thrust penalty
-    # 9. Small time penalty
-    # 10. Large successful-landing reward
-    # 11. Large failure reward
+    # 1. Horizontal progress toward the platform
+    # 2. Progress toward the finite tilted platform surface
+    # 3. Relative velocity penalty, increasingly important near
+    #    the platform
+    # 4. Orientation penalty, increasingly important near the
+    #    platform
+    # 5. Tower disturbance penalty
+    # 6. Sustained high-thrust penalty
+    # 7. Small time penalty
+    # 8. Large successful-landing reward
+    # 9. Large failure penalty
+    #
+    # IMPORTANT:
+    #
+    # The old infinite-plane proximity reward has been removed from
+    # the active calculation. It is retained below as commented-out
+    # code for reference.
     # ================================================================
 
     def _calculate_reward(
@@ -715,125 +866,181 @@ class DroneLandingEnv(gym.Env):
         drone_position = self.data.xpos[self.drone_id]
         platform_position = self.data.xpos[self.platform_id]
 
+        platform_rotation = self.data.xmat[
+            self.platform_id
+        ].reshape(3, 3)
+
         # ============================================================
-        # 1. PROXIMITY / PROGRESS REWARD
+        # 1. HORIZONTAL PLATFORM PROGRESS
         #
-        # Reward only the reduction in distance to the platform.
+        # This is now the primary navigation reward.
         #
-        # Positive = moved closer
-        # Negative = moved farther away
+        # Only horizontal x/y distance matters here.
+        #
+        # Positive = moved horizontally closer.
+        # Negative = moved horizontally farther away.
         # ============================================================
 
-        current_distance = np.linalg.norm(
+        relative_position_world = (
             drone_position - platform_position
         )
 
-        if self.previous_distance is None:
+        relative_position_platform = (
+            platform_rotation.T
+            @ relative_position_world
+        )
 
-            proximity_reward = 0.0
+        horizontal_distance = np.linalg.norm(
+            relative_position_platform[:2]
+        )
+
+        if self.previous_horizontal_distance is None:
+
+            horizontal_progress_reward = 0.0
 
         else:
 
-            distance_progress = (
-                self.previous_distance
-                - current_distance
+            horizontal_progress = (
+                self.previous_horizontal_distance
+                - horizontal_distance
             )
 
-            proximity_reward = (
+            horizontal_progress_reward = (
                 self.reward_proximity
-                * distance_progress
+                * horizontal_progress
             )
 
-        self.previous_distance = current_distance
+        self.previous_horizontal_distance = horizontal_distance
 
         # ============================================================
-        # 2. PLATFORM-PLANE PROXIMITY
+        # 2. FINITE PLATFORM SURFACE PROGRESS
         #
-        # Reward being close to the tilted platform plane.
+        # Reward progress toward the actual finite platform surface.
         #
-        # This uses perpendicular distance to the plane rather than
-        # world Z, so it follows the platform's 30-degree tilt.
+        # This reward is disabled while the drone is far away from
+        # the platform horizontally.
+        #
+        # This prevents the old "infinite plane" exploit.
         # ============================================================
 
-        signed_plane_distance = (
-            self._get_platform_plane_distance()
+        surface_distance = (
+            self._get_platform_surface_distance()
         )
 
-        absolute_plane_distance = abs(
-            signed_plane_distance
-        )
+        if self.previous_surface_distance is None:
 
-        plane_proximity_reward = (
-            self.reward_plane_proximity
-            * np.exp(
-                -absolute_plane_distance
-                / self.plane_reward_distance
-            )
-        )
-
-        # ============================================================
-        # 3. HEIGHT ABOVE PLATFORM PLANE
-        #
-        # Being above the plane is allowed, but increasingly costly
-        # as the drone gets too far from the landing plane.
-        #
-        # This discourages the agent from simply remaining high above
-        # the platform.
-        # ============================================================
-
-        if signed_plane_distance > 0.0:
-
-            normalized_height = (
-                signed_plane_distance
-                / self.plane_reward_distance
-            )
-
-            above_plane_penalty = (
-                self.penalty_above_plane
-                * normalized_height ** 2
-            )
+            surface_progress_reward = 0.0
 
         else:
 
-            above_plane_penalty = 0.0
-
-        # ============================================================
-        # 4. BELOW PLATFORM PLANE
-        #
-        # Being below the landing plane is strongly discouraged.
-        #
-        # The penalty increases exponentially with distance below the
-        # plane, making descent toward the floor increasingly costly.
-        # ============================================================
-
-        if signed_plane_distance < 0.0:
-
-            normalized_below_distance = (
-                abs(signed_plane_distance)
-                / self.plane_reward_distance
+            surface_progress = (
+                self.previous_surface_distance
+                - surface_distance
             )
 
-            below_plane_penalty = (
-                self.penalty_below_plane
-                * (
-                    np.exp(
-                        self.plane_exponential_scale
-                        * normalized_below_distance
-                    )
-                    - 1.0
+            if horizontal_distance <= self.surface_activation_distance:
+
+                surface_progress_reward = (
+                    self.reward_surface_proximity
+                    * surface_progress
                 )
-            )
 
-        else:
+            else:
 
-            below_plane_penalty = 0.0
+                surface_progress_reward = 0.0
+
+        self.previous_surface_distance = surface_distance
 
         # ============================================================
-        # 5. RELATIVE VELOCITY PENALTY
+        # OLD INFINITE-PLANE PROXIMITY REWARD
         #
-        # Penalize movement relative to the platform.
+        # COMMENTED OUT.
         #
-        # Squared velocity makes high speeds increasingly expensive.
+        # This was the source of the unwanted behaviour because the
+        # drone could approach the infinite plane without approaching
+        # the finite landing platform.
+        # ============================================================
+
+        # signed_plane_distance = (
+        #     self._get_platform_plane_distance()
+        # )
+        #
+        # absolute_plane_distance = abs(
+        #     signed_plane_distance
+        # )
+        #
+        # plane_proximity_reward = (
+        #     self.reward_plane_proximity
+        #     * np.exp(
+        #         -absolute_plane_distance
+        #         / self.plane_reward_distance
+        #     )
+        # )
+
+        # ============================================================
+        # OLD ABOVE-PLANE PENALTY
+        #
+        # COMMENTED OUT.
+        # ============================================================
+
+        # if signed_plane_distance > 0.0:
+        #
+        #     normalized_height = (
+        #         signed_plane_distance
+        #         / self.plane_reward_distance
+        #     )
+        #
+        #     above_plane_penalty = (
+        #         self.penalty_above_plane
+        #         * normalized_height ** 2
+        #     )
+        #
+        # else:
+        #
+        #     above_plane_penalty = 0.0
+
+        # ============================================================
+        # OLD BELOW-PLANE PENALTY
+        #
+        # COMMENTED OUT.
+        #
+        # The exponential penalty could become extremely large and
+        # discourage the agent from descending at all.
+        # ============================================================
+
+        # if signed_plane_distance < 0.0:
+        #
+        #     normalized_below_distance = (
+        #         abs(signed_plane_distance)
+        #         / self.plane_reward_distance
+        #     )
+        #
+        #     below_plane_penalty = (
+        #         self.penalty_below_plane
+        #         * (
+        #             np.exp(
+        #                 self.plane_exponential_scale
+        #                 * normalized_below_distance
+        #             )
+        #             - 1.0
+        #         )
+        #     )
+        #
+        # else:
+        #
+        #     below_plane_penalty = 0.0
+
+        # ============================================================
+        # 3. RELATIVE VELOCITY PENALTY
+        #
+        # Velocity is penalized more strongly when the drone is near
+        # the platform.
+        #
+        # Far away:
+        #     The drone is allowed to move aggressively.
+        #
+        # Near platform:
+        #     The drone is encouraged to slow down for landing.
         # ============================================================
 
         drone_velocity = self.data.qvel[
@@ -853,28 +1060,33 @@ class DroneLandingEnv(gym.Env):
 
         relative_speed = np.linalg.norm(relative_velocity)
 
+        near_platform_factor = np.exp(
+            -horizontal_distance
+            / self.surface_activation_distance
+        )
+
         velocity_penalty = (
             self.penalty_velocity
+            * near_platform_factor
             * relative_speed ** 2
         )
 
         # ============================================================
-        # 6. ORIENTATION PENALTY
+        # 4. ORIENTATION PENALTY
         #
-        # Penalize the angle between the drone and the platform.
+        # Orientation is also made increasingly important as the
+        # drone approaches the platform.
         #
-        # This automatically adapts to the current platform angle.
+        # This allows aggressive manoeuvring when far away while
+        # encouraging platform alignment during the final approach.
         # ============================================================
 
         drone_rotation = self.data.xmat[
             self.drone_id
         ].reshape(3, 3)
 
-        platform_rotation = self.data.xmat[
-            self.platform_id
-        ].reshape(3, 3)
-
         drone_z_axis = drone_rotation[:, 2]
+
         platform_normal = platform_rotation[:, 2]
 
         alignment = np.clip(
@@ -887,11 +1099,12 @@ class DroneLandingEnv(gym.Env):
 
         orientation_penalty = (
             self.penalty_orientation
+            * near_platform_factor
             * orientation_angle ** 2
         )
 
         # ============================================================
-        # 7. EXPONENTIAL TOWER-DISTURBANCE PENALTY
+        # 5. EXPONENTIAL TOWER-DISTURBANCE PENALTY
         #
         # Find the largest horizontal displacement of any tower block.
         #
@@ -935,7 +1148,7 @@ class DroneLandingEnv(gym.Env):
         )
 
         # ============================================================
-        # 8. SUSTAINED HIGH-THRUST PENALTY
+        # 6. SUSTAINED HIGH-THRUST PENALTY
         #
         # Normal thrust is fine.
         #
@@ -985,7 +1198,7 @@ class DroneLandingEnv(gym.Env):
             thrust_penalty = 0.0
 
         # ============================================================
-        # 9. TIME PENALTY
+        # 7. TIME PENALTY
         #
         # Small cost every simulation step.
         # ============================================================
@@ -994,13 +1207,30 @@ class DroneLandingEnv(gym.Env):
 
         # ============================================================
         # COMBINE STEP REWARD
+        #
+        # OLD:
+        #
+        # reward = (
+        #     proximity_reward
+        #     + plane_proximity_reward
+        #     - above_plane_penalty
+        #     - below_plane_penalty
+        #     ...
+        # )
+        #
+        # NEW:
+        #
+        # Horizontal progress is the main navigation objective.
+        #
+        # Surface progress becomes active only near the platform.
+        #
+        # Velocity and orientation become more important near the
+        # platform.
         # ============================================================
 
         reward = (
-            proximity_reward
-            + plane_proximity_reward
-            - above_plane_penalty
-            - below_plane_penalty
+            horizontal_progress_reward
+            + surface_progress_reward
             - velocity_penalty
             - orientation_penalty
             - tower_penalty
@@ -1009,7 +1239,7 @@ class DroneLandingEnv(gym.Env):
         )
 
         # ============================================================
-        # 10. SUCCESS / FAILURE TERMS
+        # 8. SUCCESS / FAILURE TERMS
         #
         # These dominate the smaller shaping rewards.
         # ============================================================
@@ -1155,14 +1385,42 @@ class DroneLandingEnv(gym.Env):
         drone_position = self.data.xpos[self.drone_id]
         platform_position = self.data.xpos[self.platform_id]
 
-        self.previous_distance = np.linalg.norm(
+        platform_rotation = self.data.xmat[
+            self.platform_id
+        ].reshape(3, 3)
+
+        relative_position_world = (
             drone_position - platform_position
         )
 
-        # Initialize distance to the tilted platform plane.
-        self.previous_plane_distance = abs(
-            self._get_platform_plane_distance()
+        relative_position_platform = (
+            platform_rotation.T
+            @ relative_position_world
         )
+
+        # Initialize horizontal distance.
+        self.previous_horizontal_distance = np.linalg.norm(
+            relative_position_platform[:2]
+        )
+
+        # Initialize distance to the finite platform surface.
+        self.previous_surface_distance = (
+            self._get_platform_surface_distance()
+        )
+
+        # ============================================================
+        # OLD RESET DISTANCE STATE
+        #
+        # Retained for reference.
+        # ============================================================
+
+        # self.previous_distance = np.linalg.norm(
+        #     drone_position - platform_position
+        # )
+
+        # self.previous_plane_distance = abs(
+        #     self._get_platform_plane_distance()
+        # )
 
         observation = self._get_observation()
 
@@ -1303,6 +1561,38 @@ class DroneLandingEnv(gym.Env):
             thrust
         )
 
+        # ============================================================
+        # CALCULATE DEBUG VALUES FOR INFO
+        # ============================================================
+
+        drone_position = self.data.xpos[self.drone_id]
+        platform_position = self.data.xpos[self.platform_id]
+
+        platform_rotation = self.data.xmat[
+            self.platform_id
+        ].reshape(3, 3)
+
+        relative_position_world = (
+            drone_position - platform_position
+        )
+
+        relative_position_platform = (
+            platform_rotation.T
+            @ relative_position_world
+        )
+
+        horizontal_distance = np.linalg.norm(
+            relative_position_platform[:2]
+        )
+
+        surface_distance = (
+            self._get_platform_surface_distance()
+        )
+
+        plane_distance = (
+            self._get_platform_plane_distance()
+        )
+
         # ------------------------------------------------------------
         # INFO
         # ------------------------------------------------------------
@@ -1315,6 +1605,12 @@ class DroneLandingEnv(gym.Env):
             "torque_x": torque[0],
             "torque_y": torque[1],
             "torque_z": torque[2],
+
+            # Reward/debug geometry
+            "horizontal_distance": horizontal_distance,
+            "surface_distance": surface_distance,
+            "plane_distance": plane_distance,
+
             "termination_reason": termination_reason
         }
 
