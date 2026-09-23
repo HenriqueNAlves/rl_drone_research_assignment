@@ -1,12 +1,12 @@
 import os
-
 import re
-
-import gymnasium as gym
+import datetime
 
 from stable_baselines3 import PPO
-
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.logger import configure
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from test_env import DroneLandingEnv
 
@@ -18,105 +18,59 @@ from test_env import DroneLandingEnv
 class TrainingStatsCallback(BaseCallback):
 
     def __init__(self, verbose=0):
-
         super().__init__(verbose)
-
         self.success_count = 0
-
         self.episode_count = 0
-
         self.termination_reasons = {}
 
-
     def _on_step(self) -> bool:
-
-        # Check whether an episode has ended
         dones = self.locals["dones"]
-
         infos = self.locals["infos"]
 
         for done, info in zip(dones, infos):
-
             if done:
-
                 self.episode_count += 1
 
-                # --------------------------------------------
-                # TERMINATION REASON
-                # --------------------------------------------
-
                 termination_reason = info.get(
-                    "termination_reason",
-                    "unknown"
+                    "termination_reason", "unknown"
+                )
+                self.termination_reasons[termination_reason] = (
+                    self.termination_reasons.get(termination_reason, 0) + 1
                 )
 
-                if termination_reason not in self.termination_reasons:
-
-                    self.termination_reasons[
-                        termination_reason
-                    ] = 0
-
-                self.termination_reasons[
-                    termination_reason
-                ] += 1
-
-
-                # --------------------------------------------
-                # SUCCESS
-                # --------------------------------------------
-
-                if termination_reason == "successful_landing":
-
+                if termination_reason == "hover_success":
                     self.success_count += 1
 
-
-        # --------------------------------------------
-        # LOG STATISTICS
-        # --------------------------------------------
-
         if self.episode_count > 0:
-
-            success_rate = (
-                self.success_count
-                / self.episode_count
-            )
-
             self.logger.record(
                 "rollout/success_rate",
-                success_rate
+                self.success_count / self.episode_count
             )
-
-
-            # --------------------------------------------
-            # TERMINATION REASON DISTRIBUTION
-            # --------------------------------------------
-
             for reason, count in self.termination_reasons.items():
-
-                percentage = (
-                    count
-                    / self.episode_count
-                )
-
                 self.logger.record(
                     f"rollout/termination_{reason}",
-                    percentage
+                    count / self.episode_count
                 )
-
 
         return True
 
 
 # ============================================================
-# FOLDER FOR TRAINED MODELS
+# FOLDERS
 # ============================================================
 
 model_dir = "ppo_models"
+os.makedirs(model_dir, exist_ok=True)
 
-os.makedirs(
-    model_dir,
-    exist_ok=True
+run_name = "sq_dist_defaults"
+run_timestamp = (
+    f"{run_name}_"
+    f"{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
 )
+log_dir = os.path.join("logs", run_timestamp)
+os.makedirs(log_dir, exist_ok=True)
+
+print(f"Logging this run to: {log_dir}")
 
 
 # ============================================================
@@ -124,91 +78,74 @@ os.makedirs(
 # ============================================================
 
 existing_versions = []
-
 for filename in os.listdir(model_dir):
-
-    match = re.match(
-        r"ppo_drone_landing_v(\d+)\.zip$",
-        filename
-    )
-
+    match = re.match(r"ppo_drone_landing_v(\d+)\.zip$", filename)
     if match:
+        existing_versions.append(int(match.group(1)))
 
-        existing_versions.append(
-            int(match.group(1))
-        )
-
-
-if existing_versions:
-
-    next_version = max(existing_versions) + 1
-
-else:
-
-    next_version = 1
-
+next_version = max(existing_versions) + 1 if existing_versions else 1
 
 model_path = os.path.join(
-    model_dir,
-    f"ppo_drone_landing_v{next_version}"
+    model_dir, f"ppo_drone_landing_v{next_version}"
 )
+vec_normalize_path = model_path + "_vecnormalize.pkl"
 
-print(
-    f"Saving model as: {model_path}.zip"
-)
-
-
-# ============================================================
-# CREATE ENVIRONMENT
-# ============================================================
-
-env = DroneLandingEnv()
+print(f"Saving model as: {model_path}.zip")
 
 
 # ============================================================
-# CREATE PPO AGENT
+# ENVIRONMENT
+# ============================================================
+
+def make_env():
+    return Monitor(DroneLandingEnv())
+
+env = DummyVecEnv([make_env])
+env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+
+
+# ============================================================
+# PPO — DEFAULTS (no tuning)
 # ============================================================
 
 model = PPO(
-
     "MlpPolicy",
-
     env,
-
     verbose=1,
-
+    device="cpu",
 )
 
 
 # ============================================================
-# CREATE TRAINING CALLBACK
+# LOGGER
+# ============================================================
+
+new_logger = configure(
+    log_dir,
+    ["stdout", "csv", "tensorboard"]
+)
+model.set_logger(new_logger)
+
+
+# ============================================================
+# TRAIN — 5 MILLION STEPS
 # ============================================================
 
 stats_callback = TrainingStatsCallback()
 
-
-# ============================================================
-# TRAIN
-# ============================================================
-
 model.learn(
-
-    total_timesteps=2_500_000,
-
-    callback=stats_callback
-
+    total_timesteps=3_000_000,
+    callback=stats_callback,
 )
 
 
 # ============================================================
-# SAVE TRAINED MODEL
+# SAVE
 # ============================================================
 
 model.save(model_path)
+env.save(vec_normalize_path)
 
-
-# ============================================================
-# CLOSE ENVIRONMENT
-# ============================================================
+print(f"Saved normalization stats as: {vec_normalize_path}")
 
 env.close()

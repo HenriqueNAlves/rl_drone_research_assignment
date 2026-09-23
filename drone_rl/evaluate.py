@@ -3,322 +3,283 @@ import re
 import time
 
 import mujoco
+import numpy as np
 from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from test_env import DroneLandingEnv
 
 
 # ============================================================
-# FIND LATEST TRAINED MODEL
+# SETTINGS
+# ============================================================
+
+NUM_EPISODES = 10
+
+starting_position = [0.5, 0.5, 0.5]
+hover_target = [0.5, -0.5, 1.0]
+
+
+# ============================================================
+# FIND ALL TRAINED MODELS
 # ============================================================
 
 model_dir = "ppo_models"
 
-existing_versions = []
-
+versions = []
 for filename in os.listdir(model_dir):
-
-    match = re.match(
-        r"ppo_drone_landing_v(\d+)\.zip$",
-        filename
-    )
-
+    match = re.match(r"ppo_drone_landing_v(\d+)\.zip$", filename)
     if match:
-        existing_versions.append(
-            int(match.group(1))
-        )
+        versions.append(int(match.group(1)))
 
+if not versions:
+    raise FileNotFoundError("No trained models found in ppo_models/")
 
-if not existing_versions:
+versions.sort()
 
-    raise FileNotFoundError(
-        "No trained models found in ppo_models/"
+print()
+print("=" * 60)
+print("Available models:")
+print("=" * 60)
+
+for i, v in enumerate(versions, start=1):
+    model_file = os.path.join(
+        model_dir, f"ppo_drone_landing_v{v}.zip"
     )
+    stat = os.stat(model_file)
+    mtime = time.strftime(
+        "%Y-%m-%d %H:%M", time.localtime(stat.st_mtime)
+    )
+    size_kb = stat.st_size / 1024
+    print(f"  {i:2d}. v{v:<3d}   {size_kb:8.1f} KB   saved {mtime}")
 
+print()
 
-latest_version = max(existing_versions)
+while True:
+    raw = input(
+        f"Choose a version (1-{len(versions)}, "
+        f"or 'q' to quit): "
+    ).strip()
+
+    if raw.lower() == "q":
+        print("Exiting.")
+        raise SystemExit
+
+    try:
+        choice = int(raw)
+        if 1 <= choice <= len(versions):
+            chosen_version = versions[choice - 1]
+            break
+        else:
+            print(f"Please enter a number between 1 and {len(versions)}.")
+    except ValueError:
+        print("Please enter a number, or 'q' to quit.")
 
 model_path = os.path.join(
-    model_dir,
-    f"ppo_drone_landing_v{latest_version}"
+    model_dir, f"ppo_drone_landing_v{chosen_version}"
 )
+vec_normalize_path = model_path + "_vecnormalize.pkl"
 
-print(
-    f"Loading model: {model_path}.zip"
-)
+print()
+print(f"Loading model: {model_path}.zip")
+print(f"Loading normalization stats: {vec_normalize_path}")
+print()
 
 
 # ============================================================
 # LOAD TRAINED MODEL
 # ============================================================
 
-model = PPO.load(model_path)
+model = PPO.load(model_path, device="cpu")
 
 
 # ============================================================
 # CREATE ENVIRONMENT
 # ============================================================
 
-env = DroneLandingEnv()
+def make_env():
+    return DroneLandingEnv()
+
+vec_env = DummyVecEnv([make_env])
+
+if not os.path.exists(vec_normalize_path):
+    print()
+    print(f"WARNING: {vec_normalize_path} not found.")
+    print("Skipping VecNormalize — observations will NOT be")
+    print("normalized. The model may behave strangely if it was")
+    print("trained with normalization enabled.")
+    print()
+    input("Press Enter to continue anyway, or Ctrl-C to abort...")
+else:
+    vec_env = VecNormalize.load(vec_normalize_path, vec_env)
+    vec_env.training = False
+    vec_env.norm_reward = False
+
+env = vec_env.envs[0]
 
 
 # ============================================================
-# TEST STARTING POSITIONS
+# PRINT HEADER
 # ============================================================
 
-starting_positions = [
-
-    [0.0, 0.0, 1.0],
-
-    [0.2, 0.0, 1.0],
-
-    [-0.2, 0.0, 1.0],
-
-    [0.0, 0.2, 1.0],
-
-    [0.0, -0.2, 1.0],
-
-    [0.4, 0.0, 1.0],
-
-    [-0.4, 0.0, 1.0],
-
-    [0.0, 0.4, 1.0],
-
-    [0.0, -0.4, 1.0],
-
-]
+print("=" * 70)
+print(f"      HOVER EVALUATION — v{chosen_version} — {NUM_EPISODES} EPISODES")
+print("=" * 70)
+print(f"Starting position: {starting_position}")
+print(f"Hover target:      {hover_target}")
+print("=" * 70)
+print()
 
 
 # ============================================================
-# EVALUATION STATISTICS
+# LAUNCH VIEWER ONCE, RUN MULTIPLE EPISODES
 # ============================================================
 
-total_episodes = len(starting_positions)
+all_distances = []
+all_thrusts = []
+all_rewards = []
+all_lengths = []
+all_reasons = []
 
-successful_episodes = 0
-
-episode_results = []
-
-
-# ============================================================
-# CREATE VIEWER
-# ============================================================
-
-observation, info = env.reset()
-
-with mujoco.viewer.launch_passive(
-    env.model,
-    env.data
-) as viewer:
+with mujoco.viewer.launch_passive(env.model, env.data) as viewer:
 
     env.viewer = viewer
 
-    position_index = 0
+    viewer.cam.distance = 2.0
+    viewer.cam.azimuth = 90.0
+    viewer.cam.elevation = -20.0
 
-    # --------------------------------------------------------
-    # SET INITIAL DRONE POSITION
-    # --------------------------------------------------------
+    for episode_idx in range(NUM_EPISODES):
 
-    env.data.qpos[
-        env.model.jnt_qposadr[env.drone_joint_id]:
-        env.model.jnt_qposadr[env.drone_joint_id] + 3
-    ] = starting_positions[position_index]
+        # ------------------------------------------------
+        # RESET + OVERRIDE SPAWN
+        # ------------------------------------------------
+        obs = vec_env.reset()
 
-    mujoco.mj_forward(
-        env.model,
-        env.data
-    )
+        env.data.qpos[
+            env.model.jnt_qposadr[env.drone_joint_id]:
+            env.model.jnt_qposadr[env.drone_joint_id] + 3
+        ] = starting_position
 
-    observation = env._get_observation()
+        mujoco.mj_forward(env.model, env.data)
 
-    print()
-    print("=" * 70)
-    print("                     EVALUATION")
-    print("=" * 70)
-    print(
-        f"Testing {total_episodes} starting positions"
-    )
-    print("=" * 70)
-
-    print(
-        f"\nTESTING STARTING POSITION "
-        f"{position_index + 1}/{total_episodes}: "
-        f"{starting_positions[position_index]}"
-    )
-
-    # ========================================================
-    # RUN EVALUATION
-    # ========================================================
-
-    while viewer.is_running():
-
-        # ----------------------------------------------------
-        # ASK PPO WHAT ACTION TO TAKE
-        # ----------------------------------------------------
-
-        action, _ = model.predict(
-            observation,
-            deterministic=True
-        )
-
-        # ----------------------------------------------------
-        # APPLY ACTION
-        # ----------------------------------------------------
-
-        observation, reward, terminated, truncated, info = (
-            env.step(action)
-        )
-
-        # ----------------------------------------------------
-        # UPDATE VIEWER
-        # ----------------------------------------------------
-
-        viewer.sync()
-
-        # ----------------------------------------------------
-        # EPISODE ENDED
-        # ----------------------------------------------------
-
-        if terminated or truncated:
-
-            termination_reason = info[
-                "termination_reason"
-            ]
-
-            # ------------------------------------------------
-            # CHECK SUCCESS
-            # ------------------------------------------------
-
-            success = (
-                termination_reason
-                == "successful_landing"
+        if vec_normalize_path and os.path.exists(vec_normalize_path):
+            obs = vec_env.normalize_obs(
+                env._get_observation().reshape(1, -1)
             )
+        else:
+            obs = env._get_observation().reshape(1, -1)
 
-            if success:
-                successful_episodes += 1
+        print(f"--- Episode {episode_idx + 1} / {NUM_EPISODES} ---")
 
-            # Store result
-            episode_results.append(
-                {
-                    "starting_position":
-                        starting_positions[position_index],
-                    "success":
-                        success,
-                    "termination_reason":
-                        termination_reason,
-                    "reward":
-                        reward,
-                }
-            )
+        # ------------------------------------------------
+        # EPISODE LOOP
+        # ------------------------------------------------
+        distances = []
+        thrust_values = []
+        episode_step = 0
+        last_print_step = 0
+        episode_reward = 0.0
 
-            # ------------------------------------------------
-            # PRINT EPISODE RESULT
-            # ------------------------------------------------
+        while viewer.is_running():
 
-            print()
-            print("-" * 70)
+            action, _ = model.predict(obs, deterministic=True)
 
-            if success:
-                print("RESULT: SUCCESS")
-            else:
-                print("RESULT: FAILURE")
+            thrust = (action[0, 0] + 1.0) / 2.0 * env.max_thrust
+            thrust_values.append(float(thrust))
 
-            print(
-                "Termination reason:",
-                termination_reason
-            )
+            obs, reward, done, info = vec_env.step(action)
 
-            print(
-                "Reward:",
-                reward
-            )
+            episode_step += 1
+            episode_reward += float(reward[0])
 
-            print("-" * 70)
+            drone_position = env.data.xpos[env.drone_id].copy()
+            distance = float(np.linalg.norm(
+                np.array(drone_position) - np.array(hover_target)
+            ))
+            distances.append(distance)
 
-            # ------------------------------------------------
-            # MOVE TO NEXT STARTING POSITION
-            # ------------------------------------------------
+            viewer.cam.lookat[:] = drone_position
 
-            position_index += 1
-
-            if position_index >= total_episodes:
-
-                # ============================================
-                # FINAL EVALUATION RESULTS
-                # ============================================
-
-                success_rate = (
-                    100.0
-                    * successful_episodes
-                    / total_episodes
+            # ------------- live status every 50 steps -------------
+            if episode_step - last_print_step >= 50:
+                last_print_step = episode_step
+                tilt_deg = info[0].get("tilt_deg", 0.0)
+                print(
+                    f"  step {episode_step:5d} | "
+                    f"pos=({drone_position[0]:+.3f},"
+                    f" {drone_position[1]:+.3f},"
+                    f" {drone_position[2]:+.3f}) | "
+                    f"dist={distance:.3f} | "
+                    f"tilt={tilt_deg:5.1f}° | "
+                    f"thrust={thrust:.2f}"
                 )
 
+            viewer.sync()
+
+            # ------------- episode ended -------------
+            if done[0]:
+                termination_reason = info[0].get(
+                    "termination_reason", "unknown"
+                )
+
+                min_d = min(distances) if distances else float("nan")
+                avg_d = (sum(distances) / len(distances)
+                         if distances else float("nan"))
+                avg_t = (sum(thrust_values) / len(thrust_values)
+                         if thrust_values else float("nan"))
+
+                print(
+                    f"  end | steps={episode_step} | "
+                    f"reason={termination_reason} | "
+                    f"reward={episode_reward:+.1f} | "
+                    f"min_dist={min_d:.3f} | "
+                    f"avg_dist={avg_d:.3f} | "
+                    f"avg_thrust={avg_t:.2f}"
+                )
                 print()
-                print("=" * 70)
-                print("                 EVALUATION COMPLETE")
-                print("=" * 70)
 
-                print(
-                    f"Successful landings: "
-                    f"{successful_episodes}/{total_episodes}"
-                )
-
-                print(
-                    f"SUCCESS RATE: "
-                    f"{success_rate:.2f}%"
-                )
-
-                print("=" * 70)
+                all_distances.extend(distances)
+                all_thrusts.extend(thrust_values)
+                all_rewards.append(episode_reward)
+                all_lengths.append(episode_step)
+                all_reasons.append(termination_reason)
 
                 break
 
-            # ------------------------------------------------
-            # RESET ENVIRONMENT
-            # ------------------------------------------------
+            time.sleep(0.002)
 
-            observation, info = env.reset()
-
-            # ------------------------------------------------
-            # SET NEW DRONE STARTING POSITION
-            # ------------------------------------------------
-
-            env.data.qpos[
-                env.model.jnt_qposadr[env.drone_joint_id]:
-                env.model.jnt_qposadr[env.drone_joint_id] + 3
-            ] = starting_positions[position_index]
-
-            # ------------------------------------------------
-            # ZERO DRONE VELOCITY
-            # ------------------------------------------------
-
-            env.data.qvel[
-                env.model.jnt_dofadr[env.drone_joint_id]:
-                env.model.jnt_dofadr[env.drone_joint_id] + 6
-            ] = 0.0
-
-            mujoco.mj_forward(
-                env.model,
-                env.data
-            )
-
-            # ------------------------------------------------
-            # GET NEW OBSERVATION
-            # ------------------------------------------------
-
-            observation = env._get_observation()
-
-            print()
-            print(
-                f"TESTING STARTING POSITION "
-                f"{position_index + 1}/{total_episodes}: "
-                f"{starting_positions[position_index]}"
-            )
-
-        time.sleep(0.002)
+        # ------------------------------------------------
+        # VIEWER CLOSED MID-RUN
+        # ------------------------------------------------
+        if not viewer.is_running():
+            print("Viewer closed — ending evaluation early.")
+            break
 
 
 # ============================================================
-# CLOSE ENVIRONMENT
+# AGGREGATE SUMMARY
 # ============================================================
 
-env.close()
+print("=" * 70)
+print(f"                    AGGREGATE SUMMARY — v{chosen_version}")
+print("=" * 70)
+
+if all_lengths:
+    print(f"Episodes run:            {len(all_lengths)}")
+    print(f"Mean episode length:     {sum(all_lengths) / len(all_lengths):.1f} steps")
+    print(f"Mean episode reward:     {sum(all_rewards) / len(all_rewards):+.2f}")
+    print(f"Mean min distance:       {min(all_distances):.4f} m (best across all)")
+    print(f"Overall avg distance:    {sum(all_distances) / len(all_distances):.4f} m")
+    print(f"Mean thrust:             {sum(all_thrusts) / len(all_thrusts):.4f} N")
+    print()
+    print("Termination breakdown:")
+    from collections import Counter
+    reason_counts = Counter(all_reasons)
+    for reason, count in reason_counts.most_common():
+        pct = 100.0 * count / len(all_reasons)
+        print(f"  {reason:25s} {count:3d}  ({pct:5.1f}%)")
+
+print("=" * 70)
+
+vec_env.close()
