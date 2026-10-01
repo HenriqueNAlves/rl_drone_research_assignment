@@ -8,11 +8,7 @@ import time
 
 class DroneLandingEnv(gym.Env):
     """
-    Point-to-point drone task with attitude-stabilized control.
-
-    Drone spawns at [0, 0, 1] and must reach [1, 0, 1] and hold
-    within success_distance of it for success_required_time
-    seconds.
+    Minimal hover task with attitude-stabilized control.
 
     Actions:
         action[0]  -> thrust residual around hover thrust
@@ -25,7 +21,6 @@ class DroneLandingEnv(gym.Env):
         - distance_penalty * curr_distance
         + velocity_gain    * radial_velocity
         - angular_penalty  * ||body_rates||
-        - stop_penalty * speed * proximity   (only inside stop_radius)
 
     Terminal:
         success          -> +success_bonus
@@ -38,11 +33,11 @@ class DroneLandingEnv(gym.Env):
         super().__init__()
 
         # ============================================================
-        # TASK POINTS
+        # TASK POINTS (same point: hover)
         # ============================================================
 
         self.spawn_position = np.array([0.0, 0.0, 1.0])
-        self.target_position = np.array([1.0, 0.0, 1.0])
+        self.target_position = np.array([0.0, 0.0, 1.0])
 
         # ============================================================
         # EPISODE
@@ -78,6 +73,8 @@ class DroneLandingEnv(gym.Env):
         self.rate_gain_K = 3.0
         self.rate_limit = 26.18
 
+        # thrust range around hover: action[0] = +1 -> hover + scale,
+        # action[0] = -1 -> hover - scale (clamped at 0)
         self.thrust_scale = 1.5
 
         # ============================================================
@@ -94,19 +91,15 @@ class DroneLandingEnv(gym.Env):
         # REWARD WEIGHTS
         # ============================================================
 
-        self.reward_distance_penalty = 1.5
+        self.reward_distance_penalty = 1.0
         self.reward_velocity_gain = 0.5
         self.reward_angular_penalty = 0.01
-
-        # stop penalty: active only within this radius of the target
-        self.reward_stop_radius = 0.5
-        self.reward_stop_penalty = 2.0
 
         # ============================================================
         # TERMINAL REWARDS / PENALTIES
         # ============================================================
 
-        self.reward_success_bonus = 500.0
+        self.reward_success_bonus = 100.0
         self.penalty_terminal = 10.0
 
         # ============================================================
@@ -223,7 +216,6 @@ class DroneLandingEnv(gym.Env):
             direction = np.zeros(3)
 
         radial_velocity = float(np.dot(drone_velocity, direction))
-        speed = float(np.linalg.norm(drone_velocity))
 
         body_rates = self.data.qvel[
             self.drone_dofadr + 3:self.drone_dofadr + 6
@@ -235,11 +227,6 @@ class DroneLandingEnv(gym.Env):
             + self.reward_velocity_gain * radial_velocity
             - self.reward_angular_penalty * angular_speed
         )
-
-        if curr_distance < self.reward_stop_radius:
-            proximity = 1.0 - (curr_distance / self.reward_stop_radius)
-            reward -= self.reward_stop_penalty * speed * proximity
-
         return float(reward)
 
     # ================================================================
@@ -313,6 +300,10 @@ class DroneLandingEnv(gym.Env):
 
     def step(self, action):
 
+        # thrust is a residual around hover thrust.
+        # action[0] = 0  -> hover thrust
+        # action[0] = +1 -> hover + thrust_scale
+        # action[0] = -1 -> hover - thrust_scale (clamped at 0)
         thrust = self.hover_thrust + action[0] * self.thrust_scale
         thrust = float(np.clip(thrust, 0.0, self.max_thrust))
 
@@ -454,8 +445,7 @@ if __name__ == "__main__":
             wz_action_holder[0] = 0.0
 
     print("MANUAL DRONE CONTROL — arrows = tilt, P = thrust bump, R = reset")
-    print("Thrust action 0 = hover.")
-    print(f"Spawn:  {env.spawn_position}")
+    print("Thrust action 0 = hover. Default drone should hover on its own.")
     print(f"Target: {env.target_position}")
 
     with mujoco.viewer.launch_passive(
