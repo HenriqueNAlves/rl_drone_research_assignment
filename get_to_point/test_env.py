@@ -54,7 +54,7 @@ class DroneLandingEnv(gym.Env):
         # SUCCESS
         # ============================================================
 
-        self.success_distance = 0.10
+        self.success_distance = 0.12
         self.success_required_time = 5.0
 
         # ============================================================
@@ -94,7 +94,7 @@ class DroneLandingEnv(gym.Env):
         # REWARD WEIGHTS
         # ============================================================
 
-        self.reward_distance_penalty = 1.5
+        self.reward_distance_penalty = 1.0
         self.reward_velocity_gain = 0.5
         self.reward_angular_penalty = 0.01
 
@@ -106,7 +106,7 @@ class DroneLandingEnv(gym.Env):
         # TERMINAL REWARDS / PENALTIES
         # ============================================================
 
-        self.reward_success_bonus = 500.0
+        self.reward_success_bonus = 100.0
         self.penalty_terminal = 10.0
 
         # ============================================================
