@@ -1,0 +1,17 @@
+**/ppo_models/*
+**/tensorboard/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+rl_env/
+*.log
+
+# unignoring the two shipped policies inside get_to_point
+!get_to_point/ppo_models/
+!get_to_point/ppo_models/ppo_drone_landing_v22_best.zip
+!get_to_point/ppo_models/ppo_drone_landing_v22_best_vecnormalize.pkl
+!get_to_point/ppo_models/ppo_drone_landing_v24_best.zip
+!get_to_point/ppo_models/ppo_drone_landing_v24_best_vecnormalize.pkl
