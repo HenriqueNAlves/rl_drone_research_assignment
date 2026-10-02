@@ -15,3 +15,10 @@ rl_env/
 !get_to_point/ppo_models/ppo_drone_landing_v22_best_vecnormalize.pkl
 !get_to_point/ppo_models/ppo_drone_landing_v24_best.zip
 !get_to_point/ppo_models/ppo_drone_landing_v24_best_vecnormalize.pkl
+
+# unignoring the two shipped policies inside get_to_point
+!hover/ppo_models/
+!hover/ppo_models/ppo_drone_landing_v13_best.zip
+!hover/ppo_models/ppo_drone_landing_v13_best_vecnormalize.pkl
+!hover/ppo_models/ppo_drone_landing_v13.zip
+!hover/ppo_models/ppo_drone_landing_v13_vecnormalize.pkl
